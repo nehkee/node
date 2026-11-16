@@ -101,6 +101,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proxyID, appPath := s.registry.matchProxy(r, s.apiOrigin, s.runnerOrigin)
+	runnerOrigin := false
 	if proxyID == "" {
 		basePath := ""
 		for _, candidate := range []string{s.basePath, s.runnerOrigin.Path} {
@@ -112,6 +113,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(w, 404, "route not found")
 			return
 		}
+		runnerOrigin = s.registry.runnerService != "" && s.registry.runnerService != s.registry.service && basePath == s.runnerOrigin.Path && matchesOrigin(r.Host, s.runnerOrigin)
 		if basePath != "" {
 			r = r.Clone(r.Context())
 			r.URL.Path = strings.TrimPrefix(r.URL.Path, basePath)
@@ -150,6 +152,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			observability.App(r, s.registry.identity(id, sid))
 		}
 	}
+	var trickleApp, trickleSession string
 	if strings.HasPrefix(r.URL.Path, "/ai/trickle/") {
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/ai/trickle/"), "/")
 		s.mu.Lock()
@@ -157,6 +160,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		var identity observability.Identity
 		if ch != nil {
 			identity = ch.identity
+			trickleApp, trickleSession = ch.appID, ch.sessionID
 		}
 		s.mu.Unlock()
 		observability.Stream(r, identity, "trickle")
@@ -175,6 +179,16 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		observability.Outcome(r, "capacity")
 		fail(w, http.StatusServiceUnavailable, "server busy")
 		return
+	}
+	// Client Trickle requests count as session activity. Requests on a separate
+	// runner origin are runner traffic and do not keep the session alive.
+	if trickleSession != "" && !runnerOrigin {
+		_, done, ok := s.registry.beginRequest(trickleApp, trickleSession)
+		if !ok {
+			fail(w, http.StatusNotFound, "session not found")
+			return
+		}
+		defer done()
 	}
 	if proxyID != "" {
 		r.SetPathValue("proxy_id", proxyID)
@@ -518,11 +532,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, transport http.Ro
 	}
 	identity := s.registry.identity(appID, sid)
 	transport = upstreamObserver{transport, s.registry.metrics, identity, kind}
-	sessionCtx, ok := s.registry.sessionContext(appID, sid)
-	if !ok || sessionCtx.Err() != nil {
+	// The request stays in flight for idle-timeout accounting until the proxy
+	// returns, which covers long polls, SSE and hijacked WebSocket streams.
+	sessionCtx, done, ok := s.registry.beginRequest(appID, sid)
+	if !ok {
 		fail(w, http.StatusNotFound, "session not found")
 		return
 	}
+	defer done()
 	ctx, cancel := context.WithCancel(r.Context())
 	stop := context.AfterFunc(sessionCtx, func() {
 		if stopped, ok := context.Cause(sessionCtx).(runnerStopped); ok {

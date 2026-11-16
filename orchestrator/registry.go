@@ -190,6 +190,10 @@ type session struct {
 	PriceInfo priceInfo
 	ctx       context.Context
 	cancel    context.CancelCauseFunc
+	// active counts in-flight client requests; idleSince is set whenever the
+	// count reaches zero and when the reservation is admitted.
+	active    int
+	idleSince time.Time
 }
 
 var errInvalidSessionToken = errors.New("invalid session token")
@@ -229,6 +233,7 @@ type Registry struct {
 	interval      time.Duration
 	ttl           time.Duration
 	drainTimeout  time.Duration
+	idleTimeout   time.Duration
 	onEvent       func(runnerID, appID, event, sessionID, sessionToken string)
 	weiPerUSD     *big.Rat
 	rateUntil     time.Time
@@ -727,7 +732,8 @@ func (r *Registry) reserveWithPrice(id, requestedID string, agreed *appQuote, mo
 	}
 	target, _ := destination.ParseURL(item.RunnerURL)
 	ctx, cancel := context.WithCancelCause(context.Background())
-	item.Sessions[sessionID] = &session{target: target, identity: appIdentity(id, item), pending: agreed != nil, ID: sessionID, Token: token, Created: time.Now(), Proxies: map[string]sessionProxy{}, PriceInfo: price, ctx: ctx, cancel: cancel}
+	now := time.Now()
+	item.Sessions[sessionID] = &session{target: target, identity: appIdentity(id, item), pending: agreed != nil, ID: sessionID, Token: token, Created: now, idleSince: now, Proxies: map[string]sessionProxy{}, PriceInfo: price, ctx: ctx, cancel: cancel}
 	r.sessions[sessionID] = item
 	appURL := r.appURL(id, item.Mode, sessionID)
 	if item.Proxy && item.Mode == "persistent" {
@@ -963,6 +969,52 @@ func (r *Registry) Expire() {
 			}
 		}
 	}
+	for id, item := range r.apps {
+		for sid, sess := range item.Sessions {
+			if r.idleExpired(item, sess, now) {
+				r.releaseLocked(id, sid, nil, "idle_timeout")
+			}
+		}
+	}
+}
+
+// idleExpired requires r.mu. Only admitted persistent sessions without
+// in-flight client requests expire; the deadline itself is inclusive.
+func (r *Registry) idleExpired(item *app, sess *session, now time.Time) bool {
+	return r.idleTimeout > 0 && item.Mode == "persistent" && !sess.pending && sess.active == 0 && !now.Before(sess.idleSince.Add(r.idleTimeout))
+}
+
+// beginRequest admits one client request for a session and returns the
+// session context and a function that must be called when the request or
+// stream finishes. Expiry is checked and the request counted under one lock,
+// so a request at or after the idle deadline cannot revive the session.
+func (r *Registry) beginRequest(id, sid string) (context.Context, func(), bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	item := r.apps[id]
+	if item == nil || item.Sessions[sid] == nil {
+		return nil, nil, false
+	}
+	sess := item.Sessions[sid]
+	if r.idleExpired(item, sess, time.Now()) {
+		r.releaseLocked(id, sid, nil, "idle_timeout")
+		return nil, nil, false
+	}
+	if sess.ctx.Err() != nil {
+		return nil, nil, false
+	}
+	sess.active++
+	var once sync.Once
+	return sess.ctx, func() {
+		once.Do(func() {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			sess.active--
+			if sess.active == 0 {
+				sess.idleSince = time.Now()
+			}
+		})
+	}, true
 }
 
 type StaticRunner struct {
@@ -1110,6 +1162,8 @@ func (r *Registry) activateSession(id, sid string) bool {
 	sess := item.Sessions[sid]
 	if sess.pending {
 		sess.pending = false
+		// Paid reservations are admitted once payment succeeds.
+		sess.idleSince = time.Now()
 		if r.onEvent != nil {
 			r.onEvent(item.owner.ID, id, "reserved", sid, sess.Token)
 		}

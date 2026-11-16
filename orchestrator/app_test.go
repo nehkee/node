@@ -404,6 +404,34 @@ func TestLocalExampleConfig(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestSessionIdleTimeoutConfig(t *testing.T) {
+	t.Setenv("LIVEPEER_ORCHESTRATOR_BOOTSTRAP_SECRET", "test")
+	path := filepath.Join(t.TempDir(), "config.toml")
+	test.WriteConfig(t, path, `SessionIdleTimeout = "10m"`)
+	for _, tc := range []struct {
+		name, env string
+		want      any
+		args      []string
+	}{
+		{name: "default disabled", want: "0s", args: []string{"--config", ""}},
+		{name: "file", want: "10m0s", args: []string{"--config", path}},
+		{name: "environment", env: "5m", want: "5m0s", args: []string{"--config", path}},
+		{name: "flag", env: "5m", want: "1m0s", args: []string{"--config", path, "--session-idle-timeout", "1m"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LIVEPEER_ORCHESTRATOR_SESSION_IDLE_TIMEOUT", tc.env)
+			output, err := execute(t, append(tc.args, "--print-config")...)
+			require.NoError(t, err)
+			var printed map[string]any
+			require.NoError(t, toml.Unmarshal([]byte(output), &printed))
+			require.Equal(t, tc.want, printed["SessionIdleTimeout"])
+		})
+	}
+	_, err := execute(t, "--config", "", "--session-idle-timeout", "-1ns")
+	require.ErrorContains(t, err, "--session-idle-timeout must be nonnegative")
+	require.True(t, boa.IsUserInputError(err))
+}
+
 func TestDrainTimeoutConfig(t *testing.T) {
 	t.Setenv("LIVEPEER_ORCHESTRATOR_BOOTSTRAP_SECRET", "test")
 	path := filepath.Join(t.TempDir(), "config.toml")

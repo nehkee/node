@@ -91,6 +91,35 @@ Set it in TOML or with `LIVEPEER_ORCHESTRATOR_DRAIN_TIMEOUT`. Unregistering a ru
 or letting its heartbeat expire ends its sessions. An orchestrator restart ends
 all sessions. See the [heartbeat contract](http-api.md#live-runner-http) for removal confirmation.
 
+`SessionIdleTimeout` / `--session-idle-timeout` (environment variable
+`LIVEPEER_ORCHESTRATOR_SESSION_IDLE_TIMEOUT`) releases persistent sessions that
+have had no client requests in flight for that long. The default, zero, turns it
+off. Fixed-price sessions pay once when they are admitted, so a lack of payments
+does not mean the client has gone away; this timeout handles that case.
+
+- The idle clock starts when the session is admitted, so a session that is never
+  used also expires. For paid sessions, admission is when the payment is accepted.
+- Every client request the orchestrator accepts and forwards for the session
+  counts, including requests that get an application error. Requests count on the
+  session URL, its generated proxies, and its Trickle channels. Ordinary requests,
+  long polls, SSE, WebSocket, and Trickle streams stay in flight until they finish
+  or disconnect, so a stream can run longer than the timeout.
+- When the last overlapping request finishes, the idle clock restarts. The timeout
+  is measured from when that request finishes, not from when it arrived.
+- A request that arrives at or after the deadline cannot revive the session; it
+  gets `404` and the session is released.
+- Health probes, runner heartbeats, runner callbacks, payments, and background
+  billing do not count. Trickle requests that arrive on a separate
+  `RunnerServiceURL` origin are runner traffic and do not count either. When
+  runners and clients share one origin, every Trickle request for the session's
+  channels counts.
+
+An expired session is released through the normal release path, with reason
+`idle_timeout`. That path frees capacity, revokes the token, removes proxies and
+channels, and sends the usual `released` event. Applications are still
+responsible for cleaning up provider work they started separately, for example
+with their own lease.
+
 Enabling an app's proxy creates an automatic proxy belonging to that app; use its
 returned proxy ID and URL. Without a URL template, generated URLs use
 `ServiceURL/run/{proxy}`. The earlier
