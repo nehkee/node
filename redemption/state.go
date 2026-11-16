@@ -346,6 +346,18 @@ func (s *RedeemerDB) delivery(ctx context.Context, t *pm.SignedTicket, phase str
 	return err
 }
 
+// UnsettledLiability returns the face value of the payer's stored winning
+// tickets that are neither redeemed nor settled. Ticket admission checks the
+// same amount transactionally; this read lets challenges size new tickets.
+func (s *RedeemerDB) UnsettledLiability(ctx context.Context, payer common.Address) (*big.Int, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	return s.unsettledLiability(ctx, tx, payer)
+}
+
 func (s *RedeemerDB) unsettledLiability(ctx context.Context, tx *sql.Tx, payer common.Address) (*big.Int, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT w.face_value FROM ticket_state t JOIN winning_tickets w ON w.sig=t.sig WHERE w.payer_address=? AND w.redeemed_at IS NULL AND t.settled=0`, payer.Hex())
 	if err != nil {

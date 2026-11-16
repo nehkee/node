@@ -69,6 +69,7 @@ type Params struct {
 	WeiPerUSD                 *big.Rat
 	TicketFaceValue           *uint256.Int
 	TicketWinProb             *uint256.Int
+	TicketMinFaceValue        *uint256.Int  `descr:"Optional minimum face value for payer-specific tickets; payers that cannot cover --ticket-face-value get a smaller face value at the same EV"`
 	RunnerGrants              []string      `optional:"true" descr:"Private runner IP[:port] or CIDR grants"`
 	SessionProxyGrants        []string      `optional:"true" descr:"Private session proxy IP[:port] or CIDR grants"`
 	HealthGrants              []string      `optional:"true" descr:"Private static runner health IP[:port] or CIDR grants"`
@@ -80,7 +81,7 @@ type Params struct {
 }
 
 func (p Params) paymentsRequested() bool {
-	return p.RedeemerURL != nil || p.Account != nil || p.OrchestratorAddress != nil || p.KeystoreFile != "" || p.KeystorePassword != nil || p.KeystorePasswordFile != "" || p.RedeemerDB != "" || p.RPCURL != nil || p.RPCURLFile != "" || p.ChainID != nil || p.Controller != nil || p.WeiPerUSD != nil || p.ETHUSDFeed != nil || p.TicketFaceValue != nil || p.TicketWinProb != nil || p.RedeemerMaxFeePerGas != nil
+	return p.RedeemerURL != nil || p.Account != nil || p.OrchestratorAddress != nil || p.KeystoreFile != "" || p.KeystorePassword != nil || p.KeystorePasswordFile != "" || p.RedeemerDB != "" || p.RPCURL != nil || p.RPCURLFile != "" || p.ChainID != nil || p.Controller != nil || p.WeiPerUSD != nil || p.ETHUSDFeed != nil || p.TicketFaceValue != nil || p.TicketWinProb != nil || p.TicketMinFaceValue != nil || p.RedeemerMaxFeePerGas != nil
 }
 
 func (p Params) Validate() error {
@@ -129,6 +130,9 @@ func (p Params) Validate() error {
 		}
 		if *p.ChainID == 0 || p.TicketFaceValue.IsZero() || p.TicketWinProb.IsZero() {
 			return errors.New("--chain-id, --ticket-face-value and --ticket-win-prob must be positive")
+		}
+		if p.TicketMinFaceValue != nil && (p.TicketMinFaceValue.IsZero() || p.TicketMinFaceValue.Gt(p.TicketFaceValue)) {
+			return errors.New("--ticket-min-face-value must be positive and at most --ticket-face-value")
 		}
 		if p.TicketWinProb.Eq(new(uint256.Int).SetAllOne()) {
 			return errors.New("--ticket-win-prob must be less than 2^256 - 1")
@@ -297,7 +301,7 @@ func printConfig(ctx *boa.HookContext, p *Params, out io.Writer) error {
 		"RedeemerTxTimeout": &p.RedeemerTxTimeout, "RedeemerMaxTxReplacements": &p.RedeemerMaxTxReplacements,
 		"RedeemerURL": &p.RedeemerURL, "RedeemerGrants": &p.RedeemerGrants, "MaxPendingTickets": &p.MaxPendingTickets, "MaxTicketsPerRecipient": &p.MaxTicketsPerRecipient, "RedeemerDB": &p.RedeemerDB, "ChainID": &p.ChainID, "RedeemerMaxFeePerGas": &p.RedeemerMaxFeePerGas,
 		"Controller": &p.Controller, "WeiPerUSD": &p.WeiPerUSD, "ETHUSDFeed": &p.ETHUSDFeed,
-		"PriceMaxAge": &p.PriceMaxAge, "TicketFaceValue": &p.TicketFaceValue, "TicketWinProb": &p.TicketWinProb,
+		"PriceMaxAge": &p.PriceMaxAge, "TicketFaceValue": &p.TicketFaceValue, "TicketWinProb": &p.TicketWinProb, "TicketMinFaceValue": &p.TicketMinFaceValue,
 	}
 	for name, ptr := range values {
 		if !ctx.HasValue(ptr) {
@@ -426,6 +430,11 @@ func Serve(parent context.Context, p Params, logOut io.Writer) (result error) {
 		engine, err = NewPaymentEngine(redeemerDB, observedChain, recipient, p.TicketFaceValue.ToBig(), p.TicketWinProb.ToBig())
 		if err != nil {
 			return fmt.Errorf("initialize payment engine (check --account, --ticket-face-value and --ticket-win-prob): %w", err)
+		}
+		if p.TicketMinFaceValue != nil {
+			if err := engine.SetMinFaceValue(p.TicketMinFaceValue.ToBig()); err != nil {
+				return err
+			}
 		}
 	}
 	registry.proxyTemplate = p.ProxyURLTemplate
