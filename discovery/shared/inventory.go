@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/livepeer/node/destination"
@@ -62,8 +63,9 @@ func Decode[R Runner](data []byte, now time.Time) ([]Entry[R], error) {
 				continue
 			}
 		}
+		// url.Parse drops an empty fragment, which the schema still rejects.
 		address, err := url.Parse(entry.Address)
-		if err != nil || ValidateURL(address) != nil {
+		if err != nil || ValidateURL(address) != nil || strings.Contains(entry.Address, "#") {
 			continue
 		}
 		out := Entry[R]{Address: entry.Address, Runners: make([]R, 0, len(entry.Runners))}

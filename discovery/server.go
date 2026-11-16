@@ -176,6 +176,12 @@ func (s *Server) discoveryResponse() []map[string]any {
 			entries = append(entries, snapshot.Entries...)
 		}
 	}
+	return discoveryDocument(nodes, entries)
+}
+
+// discoveryDocument writes the GET /discovery envelope from source metadata and
+// decoded entries, merging runners and dropping empty orchestrator groups.
+func discoveryDocument(nodes []discoveryNode, entries []discoveryEntry) []map[string]any {
 	result := []map[string]any{}
 	if len(nodes) > 0 {
 		result = append(result, map[string]any{"nodes": nodes})

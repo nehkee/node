@@ -42,6 +42,7 @@ func TestDecodeValidation(t *testing.T) {
 		{"missing timestamp", envelope(`{"url":"https://r.example","app":"test"}`), 0, true},
 		{"wrong timestamp type", envelope(`{"url":"https://r.example","app":"test","observed_at":123}`), 0, true},
 		{"bad address", strings.ReplaceAll(envelope(valid), "https://orch.example", "file:///bad"), 0, true},
+		{"empty address fragment", strings.ReplaceAll(envelope(valid), "https://orch.example", "https://orch.example#"), 0, true},
 		{"wrong runner list", `[{"address":"https://orch.example","runners":{}}]`, 0, true},
 		{"trailing JSON", envelope(valid) + `[]`, 0, true}, {"null", "null", 0, true},
 		{"before skew", envelope(candidate(now.Add(ClockSkew - time.Nanosecond).Format(time.RFC3339Nano))), 1, false},
