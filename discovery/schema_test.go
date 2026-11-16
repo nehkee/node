@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func discoverySchema(t *testing.T) *jsonschema.Schema {
+func discoverySchema(t testing.TB) *jsonschema.Schema {
 	t.Helper()
 	compiler := jsonschema.NewCompiler()
 	compiler.AssertFormat()
@@ -33,17 +33,19 @@ func validateDiscoveryJSON(t *testing.T, schema *jsonschema.Schema, data []byte)
 	return schema.Validate(value)
 }
 
-func TestDiscoverySchema(t *testing.T) {
-	schema := discoverySchema(t)
+type discoverySchemaCase struct {
+	name, body string
+	valid      bool
+}
+
+// discoveryCorpus lists documents and whether the published schema accepts them.
+func discoveryCorpus() []discoverySchemaCase {
 	const runner = `{"url":"https://orch.example/app","app":"example","observed_at":"2026-10-22T18:05:00.123+01:00"}`
 	const metadata = `[{"nodes":[{"url":"https://orch.example","queried_at":"2026-10-22T18:05:00Z"}]}]`
 	envelope := func(record string) string {
 		return `[{"address":"https://orch.example/deployment","runners":[` + record + `]}]`
 	}
-	for _, test := range []struct {
-		name, body string
-		valid      bool
-	}{
+	return []discoverySchemaCase{
 		{"empty", `[]`, true},
 		{"empty runners", envelope(""), true},
 		{"metadata", metadata, true},
@@ -89,13 +91,19 @@ func TestDiscoverySchema(t *testing.T) {
 		{"address query", strings.ReplaceAll(envelope(runner), "https://orch.example/deployment", "https://orch.example/deployment?x=1"), false},
 		{"address empty query", strings.ReplaceAll(envelope(runner), "https://orch.example/deployment", "https://orch.example/deployment?"), false},
 		{"address fragment", strings.ReplaceAll(envelope(runner), "https://orch.example/deployment", "https://orch.example/deployment#part"), false},
+		{"address empty fragment", strings.ReplaceAll(envelope(runner), "https://orch.example/deployment", "https://orch.example/deployment#"), false},
 		{"node credentials", strings.ReplaceAll(metadata, "https://orch.example", "https://user:pass@orch.example"), false},
 		{"node query", strings.ReplaceAll(metadata, "https://orch.example", "https://orch.example?x=1"), false},
 		{"node fragment", strings.ReplaceAll(metadata, "https://orch.example", "https://orch.example#part"), false},
 		{"hostless address", strings.ReplaceAll(envelope(runner), "https://orch.example/deployment", "https://:8935/deployment"), false},
 		{"hostless node", strings.ReplaceAll(metadata, "https://orch.example", "https://:8935"), false},
 		{"userinfo-only runner", envelope(strings.ReplaceAll(runner, "https://orch.example/app", "https://user:pass@/app")), false},
-	} {
+	}
+}
+
+func TestDiscoverySchema(t *testing.T) {
+	schema := discoverySchema(t)
+	for _, test := range discoveryCorpus() {
 		t.Run(test.name, func(t *testing.T) {
 			err := validateDiscoveryJSON(t, schema, []byte(test.body))
 			if test.valid {
@@ -153,4 +161,33 @@ func TestDiscoverySchemaHTTPExample(t *testing.T) {
 	example, _, ok := strings.Cut(block, "\n```")
 	require.True(t, ok, "JSON example must have a closing fence")
 	require.NoError(t, validateDiscoveryJSON(t, discoverySchema(t), []byte(example)))
+}
+
+// FuzzDiscoveryResponse checks the producer side of the contract: any document
+// Decode accepts, re-served through the standalone discovery envelope, must
+// validate against the published schema and decode again.
+func FuzzDiscoveryResponse(f *testing.F) {
+	for _, test := range discoveryCorpus() {
+		f.Add([]byte(test.body))
+	}
+	schema := discoverySchema(f)
+	f.Fuzz(func(t *testing.T, data []byte) {
+		now := time.Now()
+		entries, err := shared.Decode[discoveryRunner](data, now)
+		if err != nil {
+			return
+		}
+		nodes := []discoveryNode{{URL: "https://source.example/base", QueriedAt: now.UTC()}}
+		for _, withNodes := range []bool{false, true} {
+			var metadata []discoveryNode
+			if withNodes {
+				metadata = nodes
+			}
+			body, err := json.Marshal(discoveryDocument(metadata, entries))
+			require.NoError(t, err)
+			require.NoError(t, validateDiscoveryJSON(t, schema, body), "served body %s from %q", body, data)
+			_, err = shared.Decode[discoveryRunner](body, now)
+			require.NoError(t, err, "served body %s must decode", body)
+		}
+	})
 }
