@@ -25,15 +25,18 @@ var maxWinProb = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewI
 // PaymentEngine owns process-local payment challenges and session accounting.
 // Winning tickets and redemption state are durable in the orchestrator redeemer.
 type PaymentEngine struct {
-	metrics       *observability.Metrics
-	identity      func(string, string) observability.Identity
-	registration  func(string) *appLifetime
-	mu            sync.Mutex
-	store         *RedeemerDB
-	chain         pm.PaymentChain
-	recipient     ethcommon.Address
-	faceValue     *big.Int
-	winProb       *big.Int
+	metrics      *observability.Metrics
+	identity     func(string, string) observability.Identity
+	registration func(string) *appLifetime
+	mu           sync.Mutex
+	store        *RedeemerDB
+	chain        pm.PaymentChain
+	recipient    ethcommon.Address
+	faceValue    *big.Int
+	winProb      *big.Int
+	// minFaceValue enables payer-specific ticket parameters when set; see
+	// payerTicketParams. Nil keeps the configured pair for every payer.
+	minFaceValue  *big.Int
 	secret        [32]byte
 	authSecret    [32]byte
 	sessions      map[string]*paymentSession
@@ -114,15 +117,19 @@ func (e *PaymentEngine) makeChallenge(ctx context.Context, appID, manifest strin
 	if !snapshot.ValidTicketRound(snapshot.Round.Int64()) {
 		return Challenge{}, errors.New("initialized round is outside ticket validity")
 	}
+	faceValue, winProb, err := e.ticketParams(ctx, payer)
+	if err != nil {
+		return Challenge{}, err
+	}
 	seed := make([]byte, 32)
 	rand.Read(seed)
 	priceInfo := wire.PriceInfo{PricePerUnit: price, UnitsPerPrice: 1}
 	expiration := &pm.TicketExpirationParams{CreationRound: snapshot.Round.Int64(), CreationRoundBlockHash: snapshot.RoundHash}
 	expiresAtBlock := new(big.Int).Add(snapshot.Block, big.NewInt(40))
-	recipientRand := e.recipientRand(new(big.Int).SetBytes(seed), payer, e.faceValue, e.winProb, expiresAtBlock, big.NewRat(price, 1), expiration)
+	recipientRand := e.recipientRand(new(big.Int).SetBytes(seed), payer, faceValue, winProb, expiresAtBlock, big.NewRat(price, 1), expiration)
 	randHash := crypto.Keccak256Hash(ethcommon.LeftPadBytes(recipientRand.Bytes(), 32))
 	info := wire.OrchestratorInfo{Transcoder: service, Address: e.recipient.Bytes(), Price: priceInfo,
-		TicketParams: wire.TicketParams{Recipient: e.recipient.Bytes(), FaceValue: e.faceValue.Bytes(), WinProb: e.winProb.Bytes(), RecipientRandHash: randHash.Bytes(), Seed: seed, ExpirationBlock: expiresAtBlock.Bytes(), Expiration: wire.ExpirationParams{CreationRound: expiration.CreationRound, CreationRoundBlockHash: expiration.CreationRoundBlockHash.Bytes()}},
+		TicketParams: wire.TicketParams{Recipient: e.recipient.Bytes(), FaceValue: faceValue.Bytes(), WinProb: winProb.Bytes(), RecipientRandHash: randHash.Bytes(), Seed: seed, ExpirationBlock: expiresAtBlock.Bytes(), Expiration: wire.ExpirationParams{CreationRound: expiration.CreationRound, CreationRoundBlockHash: expiration.CreationRoundBlockHash.Bytes()}},
 		Auth:         e.authToken(manifest, time.Now().Add(time.Hour).Unix())}
 	encoded := wire.EncodeOrchestratorInfo(info)
 	challenge := paymentChallenge(appID, manifest, service, encoded)
@@ -144,6 +151,40 @@ func (e *PaymentEngine) makeChallenge(ctx context.Context, appID, manifest strin
 	}
 	current.info, current.updated = encoded, time.Now()
 	return challenge, nil
+}
+
+// SetMinFaceValue enables payer-specific ticket parameters. A payer whose float
+// cannot cover the configured face value is offered a smaller face value, no
+// lower than min, with a win probability that preserves the configured EV.
+func (e *PaymentEngine) SetMinFaceValue(min *big.Int) error {
+	if min == nil || min.Sign() <= 0 || min.Cmp(e.faceValue) > 0 {
+		return errors.New("minimum ticket face value must be positive and at most the ticket face value")
+	}
+	e.minFaceValue = new(big.Int).Set(min)
+	return nil
+}
+
+// ticketParams reads payer funds and unsettled liability only when
+// payer-specific parameters are enabled. Receipt rechecks funds against the
+// authenticated face value, so funds that fall after the challenge are
+// rejected there, and a refreshed challenge recomputes the parameters.
+func (e *PaymentEngine) ticketParams(ctx context.Context, payer ethcommon.Address) (*big.Int, *big.Int, error) {
+	if e.minFaceValue == nil {
+		return e.faceValue, e.winProb, nil
+	}
+	funds, err := e.chain.PayerFunds(ctx, payer, e.recipient)
+	if err != nil {
+		return nil, nil, paymentObservation{err, "error"}
+	}
+	liability, err := e.store.UnsettledLiability(ctx, payer)
+	if err != nil {
+		return nil, nil, err
+	}
+	float, err := payerFloat(funds, liability)
+	if err != nil {
+		return nil, nil, err
+	}
+	return payerTicketParams(e.faceValue, e.winProb, e.minFaceValue, float)
 }
 
 func paymentChallenge(appID, manifest, service string, info []byte) Challenge {

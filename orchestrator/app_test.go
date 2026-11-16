@@ -589,6 +589,12 @@ func TestValidationBeforeStartup(t *testing.T) {
 	p.KeystoreFile, p.KeystorePasswordFile = "/missing/key", "/missing/password"
 	p.TicketWinProb = new(uint256.Int).SetAllOne()
 	require.ErrorContains(t, Serve(t.Context(), p, io.Discard), "ticket-win-prob must be less than")
+	p = paymentKeystoreParams(t, "http://127.0.0.1:1")
+	p.KeystoreFile, p.KeystorePasswordFile = "/missing/key", "/missing/password"
+	for _, min := range []*uint256.Int{new(uint256.Int), new(uint256.Int).AddUint64(p.TicketFaceValue, 1)} {
+		p.TicketMinFaceValue = min
+		require.ErrorContains(t, Serve(t.Context(), p, io.Discard), "--ticket-min-face-value must be positive and at most --ticket-face-value")
+	}
 }
 
 func TestStaticRunnerTOML(t *testing.T) {

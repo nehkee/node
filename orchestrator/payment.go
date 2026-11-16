@@ -10,6 +10,7 @@ import (
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/livepeer/node/eth"
 	"github.com/livepeer/node/internal/observability"
+	"github.com/livepeer/node/pm"
 )
 
 func paymentPrice(price priceInfo) (int64, bool) {
@@ -19,6 +20,8 @@ func paymentPrice(price priceInfo) (int64, bool) {
 	value, err := price.Price.Int64()
 	return value, err == nil && value > 0
 }
+
+const errPayerFundsMessage = "payer funds cannot back a winning ticket"
 
 func (s *Server) challenge(w http.ResponseWriter, r *http.Request, appID string, quote appQuote) {
 	if status, err := s.registry.checkCapacity(appID); err != nil {
@@ -40,6 +43,10 @@ func (s *Server) challenge(w http.ResponseWriter, r *http.Request, appID string,
 	if err != nil {
 		observability.Outcome(r, paymentAppOutcome(err))
 		s.logger.Warn("payment challenge failed", "event", "payment_challenge", "operation", "challenge", "runner_id", s.registry.identity(appID, manifest).Runner, "app_id", appID, "outcome", paymentOutcome(err), "error_kind", observability.ErrorKind(err))
+		if errors.Is(err, pm.ErrPayerUnavailable) {
+			fail(w, http.StatusBadRequest, errPayerFundsMessage)
+			return
+		}
 		fail(w, 502, "payment challenge unavailable")
 		return
 	}
@@ -223,6 +230,10 @@ func (s *Server) refreshPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	challenge, err := s.payment.RefreshChallenge(r.Context(), request.ManifestID, ethcommon.HexToAddress(request.PayerAddress), s.registry.service)
+	if errors.Is(err, pm.ErrPayerUnavailable) {
+		fail(w, http.StatusBadRequest, errPayerFundsMessage)
+		return
+	}
 	if err != nil {
 		fail(w, 404, "payment challenge not found")
 		return

@@ -151,7 +151,9 @@ For paid operation, select an on-chain `Network` and supply:
 - `RPCURLFile` or `LIVEPEER_ORCHESTRATOR_RPC_URL`: RPC credential.
 - `ChainID` and `Controller` for custom networks.
 - `TicketFaceValue` and `TicketWinProb`: positive uint256 ticket parameters.
-  The winning probability must be less than `2^256 - 1`.
+  The winning probability must be less than `2^256 - 1`. Together they set the
+  target ticket expected value (EV); see
+  [payer-specific ticket parameters](#payer-specific-ticket-parameters).
 - Exactly one conversion source: `WeiPerUSD` or `ETHUSDFeed` (Arbitrum supplies a feed).
 
 The payment database has a [default path](configuration.md); `RedeemerDB` /
@@ -179,6 +181,50 @@ successful, canonical, finalized receipt settles their liability.
 Challenges, balances, and replay guards live in memory; restart requires new
 paid sessions. Winning tickets and transaction identities survive in SQLite.
 See [payment recovery](payment-recovery.md) for backup and reconciliation.
+
+### Payer-specific ticket parameters
+
+By default every payer is offered the same `TicketFaceValue` and
+`TicketWinProb`. A payment is rejected at receipt if the payer's deposit or
+claimable reserve is below that face value, so a payer that could fund a smaller
+ticket cannot pay at all.
+
+Set `TicketMinFaceValue` / `--ticket-min-face-value` (wei, at most
+`TicketFaceValue`) to offer such payers a smaller ticket at the same EV. At each
+challenge, including refreshes, the orchestrator reads the payer's funds and
+computes the payer's float:
+
+```
+float = min(deposit, claimable reserve - unsettled winning tickets from this payer)
+```
+
+The claimable reserve is the part of the payer's reserve that this recipient is
+guaranteed. The payer's deposit is shared with every recipient and can be drained
+by their redemptions. Unsettled winning tickets are those stored in the redeemer
+database that are neither redeemed nor settled. The deposit cap keeps the
+existing receipt-time check, and the payer-side signer policy, satisfied.
+
+| Float | Offered face value | Offered win probability |
+| --- | --- | --- |
+| At least `TicketFaceValue` | `TicketFaceValue` | `TicketWinProb`, unchanged |
+| From `TicketMinFaceValue` up to `TicketFaceValue` | the float | `ceil(TicketWinProb × TicketFaceValue / float)` |
+| Below `TicketMinFaceValue`, or a ticket that would always win | rejected with `400` | — |
+
+Rounding up keeps the EV at or above the target, and the excess is less than one
+unit of win probability. For example, a 1-in-1,000 ticket with a $2 face value
+becomes a 1-in-500 ticket with a $1 face value for a payer whose float is $1.
+
+Choose `TicketMinFaceValue` so that a winning ticket is still worth redeeming
+after gas. The orchestrator does not price redemption gas itself, unlike
+go-livepeer. Ticket EV and face values stay in wei; the ETH/USD rate only
+converts runner prices.
+
+Funds can change between a challenge and a payment. The orchestrator checks
+receipts against the face value that was offered, so tickets that funds can no
+longer cover are rejected and a refreshed challenge is sized from current funds.
+If the funds RPC fails, the challenge fails with `502`, as other chain errors do.
+When `TicketMinFaceValue` is unset, challenges do not read payer funds and every
+payer gets the configured pair.
 
 ## Resource limits
 
