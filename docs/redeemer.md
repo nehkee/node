@@ -15,6 +15,8 @@ The redeemer listener defaults to `127.0.0.1:8941`; metrics, `/healthz`, and
 `/readyz` default to `127.0.0.1:8942`. Provide TLS and endpoint authentication
 through your deployment or a proxy. Use a separate persistent database for each
 redeemer; see [configuration](configuration.md) and [recovery](payment-recovery.md).
+The queue uses SQLite by default; it can instead use
+[PostgreSQL](redeemer-postgres.md), including a drain-based cutover from SQLite.
 `--config` takes a local TOML or JSON file path, as with other components.
 
 ## Authorization webhook

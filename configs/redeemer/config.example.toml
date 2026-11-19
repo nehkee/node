@@ -4,6 +4,10 @@ Listen = "127.0.0.1:8941"
 MetricsListen = "127.0.0.1:8942"
 # DataDir = "/var/lib/livepeer/redeemer"
 RedeemerDB = "tickets.sqlite"
+# Optional PostgreSQL store instead of SQLite; see docs/redeemer-postgres.md.
+# RedeemerDBBackend = "postgres"
+# RedeemerPostgresURLFile = "/run/secrets/livepeer-redeemer-postgres-url"
+# RedeemerPostgresMaxConns = 8
 # Account = "0xYOUR_DEDICATED_WALLET" # Select among shared keystore accounts.
 KeystoreFile = "/run/secrets/livepeer-redeemer-keystore.json"
 KeystorePasswordFile = "/run/secrets/livepeer-redeemer-password"

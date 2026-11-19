@@ -1,7 +1,7 @@
 # Payment state and transaction recovery
 
 SQLite preserves winning tickets and redemption transactions for
-[standalone redeemers](redeemer.md),
+[standalone redeemers](redeemer.md) (or [PostgreSQL](redeemer-postgres.md)),
 [paid orchestrators](orchestrator.md#enable-payments), and accounting events for
 [Kafka-enabled signers](signer.md#kafka-accounting-and-budgets). Orchestrator
 sessions, payment parameters, balances, and replay guards are process-local;

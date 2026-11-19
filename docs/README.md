@@ -10,6 +10,7 @@ Start with [installation](../README.md#install) and the
 | [Configuration and secrets](configuration.md) | Set TOML, environment variables, flags, and credentials. |
 | [Orchestrator](orchestrator.md) | Register runners, configure networking and proxies, and enable payments. |
 | [Standalone redeemer](redeemer.md) | Redeem winning tickets using a dedicated wallet and configure orchestrator forwarding. |
+| [Redeemer PostgreSQL storage](redeemer-postgres.md) | Run the redeemer queue on PostgreSQL: provisioning, TLS, migrations, backups, cutover and design. |
 | [Discovery](discovery.md) | Collect and advertise orchestrator inventories without local runners or payments. |
 | [Signer](signer.md) | Configure price limits, authorization, discovery, and Kafka accounting. |
 | [Chain commands](chain.md) | Inspect accounts, manage stake and funds, and submit transactions. |

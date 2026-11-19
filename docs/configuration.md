@@ -149,7 +149,8 @@ files are never overwritten. No account address is required.
 
 Missing storage directories are created with `0700` permissions; existing
 directory permissions are preserved. Keep SQLite files on persistent storage,
-and use separate database paths for separate instances.
+and use separate database paths for separate instances. A standalone redeemer
+can use PostgreSQL instead; see [redeemer PostgreSQL storage](redeemer-postgres.md).
 For signer accounting, use an owner-only parent directory and preserve those
 permissions on SQLite's WAL and SHM files during restore.
 See [payment recovery](payment-recovery.md) for backup and restart procedures.
