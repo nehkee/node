@@ -45,12 +45,14 @@ Flags:
   -w, --wei-per-usd string                  (env: LIVEPEER_ORCHESTRATOR_WEI_PER_USD)
   -t, --ticket-face-value string            (env: LIVEPEER_ORCHESTRATOR_TICKET_FACE_VALUE)
       --ticket-win-prob string              (env: LIVEPEER_ORCHESTRATOR_TICKET_WIN_PROB)
+      --ticket-min-face-value string       Optional minimum face value for payer-specific tickets; payers that cannot cover --ticket-face-value get a smaller face value at the same EV (env: LIVEPEER_ORCHESTRATOR_TICKET_MIN_FACE_VALUE)
       --runner-grants strings              Private runner IP[:port] or CIDR grants (env: LIVEPEER_ORCHESTRATOR_RUNNER_GRANTS)
       --session-proxy-grants strings       Private session proxy IP[:port] or CIDR grants (env: LIVEPEER_ORCHESTRATOR_SESSION_PROXY_GRANTS)
       --health-grants strings              Private static runner health IP[:port] or CIDR grants (env: LIVEPEER_ORCHESTRATOR_HEALTH_GRANTS)
       --heartbeat-interval duration        Runner heartbeat interval (env: LIVEPEER_ORCHESTRATOR_HEARTBEAT_INTERVAL) (default 5s)
       --heartbeat-ttl duration             Runner heartbeat expiry (env: LIVEPEER_ORCHESTRATOR_HEARTBEAT_TTL) (default 30s)
       --drain-timeout duration             Maximum app drain time after withdrawal, from 0 to 12h; zero ends work immediately (env: LIVEPEER_ORCHESTRATOR_DRAIN_TIMEOUT) (default 12h0m0s)
+      --session-idle-timeout duration      Release persistent sessions with no in-flight client requests for this long; zero disables (env: LIVEPEER_ORCHESTRATOR_SESSION_IDLE_TIMEOUT)
       --print-config[=true|false]          Print audited redacted TOML configuration
   -h, --help[=true|false]                  help for livepeer-orchestrator
   -v, --version[=true|false]               version for livepeer-orchestrator
