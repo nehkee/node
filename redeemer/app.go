@@ -3,6 +3,7 @@ package redeemer
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +39,11 @@ type Params struct {
 	MetricsListen             boa.HTTPBind       `default:"127.0.0.1:8942" descr:"Metrics and probe listener"`
 	Account                   *common.Address    `descr:"Dedicated redemption wallet; must not be an orchestrator"`
 	RedeemerDB                string             `file:"optional" descr:"Winning-ticket SQLite database"`
+	RedeemerDBBackend         string             `default:"sqlite" alts:"sqlite,postgres" strict:"true" descr:"Winning-ticket store backend"`
+	RedeemerPostgresURL       *url.URL           `name:"redeemer-postgres-url" secret:"true" optional:"true" descr:"PostgreSQL connection URL for the postgres backend"`
+	RedeemerPostgresURLFile   string             `basepath:"source" name:"redeemer-postgres-url-file" secretfor:"RedeemerPostgresURL" descr:"Owner-only file containing the PostgreSQL URL"`
+	RedeemerPostgresInsecure  bool               `optional:"true" descr:"Permit PostgreSQL without verified TLS to non-loopback hosts"`
+	RedeemerPostgresMaxConns  int                `default:"8" min:"2" descr:"Maximum PostgreSQL connections"`
 	KeystoreFile              string             `basepath:"source" optional:"true" descr:"Encrypted geth redemption account JSON file"`
 	KeystorePassword          *string            `secret:"true" optional:"true" descr:"Keystore decryption password"`
 	KeystorePasswordFile      string             `basepath:"source" secretfor:"KeystorePassword" descr:"Owner-only file containing exact password bytes"`
@@ -63,6 +69,9 @@ func (p Params) Validate() error {
 	}
 	if p.ChainID == nil || *p.ChainID == 0 || p.Controller == nil || *p.Controller == (common.Address{}) || p.RedeemerDB == "" {
 		return errors.New("redeemer requires chain-id, controller-address and redeemer-db")
+	}
+	if err := p.Database().Validate(); err != nil {
+		return err
 	}
 	if p.KeystorePassword == nil && p.KeystorePasswordFile == "" {
 		return errors.New("redeemer requires a keystore password or password file")
@@ -99,6 +108,12 @@ func (p Params) Validate() error {
 	return nil
 }
 
+// Database is the redemption store selected by the backend settings. SQLite
+// remains the default and ignores the PostgreSQL settings.
+func (p Params) Database() redemption.Database {
+	return redemption.Database{Backend: p.RedeemerDBBackend, Path: p.RedeemerDB, PostgresURL: p.RedeemerPostgresURL, PostgresInsecure: p.RedeemerPostgresInsecure, PostgresMaxConns: p.RedeemerPostgresMaxConns}
+}
+
 func Root(out, errOut io.Writer) *cobra.Command {
 	p := new(Params)
 	cmd := nodeconfig.Command("redeemer", nodeconfig.Mainnet, boa.Cmd[Params]{Use: "livepeer-redeemer", Short: "Standalone winning-ticket redeemer", Version: version.String(), Params: p, RejectUnknown: true, Args: cobra.NoArgs,
@@ -111,7 +126,8 @@ func Root(out, errOut io.Writer) *cobra.Command {
 			return nil
 		}, RunFuncCtxE: func(ctx *boa.HookContext, p *Params, cmd *cobra.Command, _ []string) error {
 			if p.PrintConfig {
-				return toml.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"Network": p.Network, "Listen": p.Listen.String(), "MetricsListen": p.MetricsListen.String(), "Account": p.Account, "ChainID": p.ChainID, "Controller": p.Controller, "RedeemerDB": p.RedeemerDB, "RedeemerTxTimeout": p.RedeemerTxTimeout.String(), "RedeemerMaxTxReplacements": p.RedeemerMaxTxReplacements, "RedeemerMaxFeePerGas": p.RedeemerMaxFeePerGas, "MaxPendingTickets": p.MaxPendingTickets, "MaxTicketsPerRecipient": p.MaxTicketsPerRecipient})
+				// The PostgreSQL URL is a credential; print only its redacted form.
+				return toml.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"Network": p.Network, "Listen": p.Listen.String(), "MetricsListen": p.MetricsListen.String(), "Account": p.Account, "ChainID": p.ChainID, "Controller": p.Controller, "RedeemerDB": p.RedeemerDB, "RedeemerDBBackend": p.RedeemerDBBackend, "RedeemerPostgres": p.Database().Describe(), "RedeemerPostgresInsecure": p.RedeemerPostgresInsecure, "RedeemerTxTimeout": p.RedeemerTxTimeout.String(), "RedeemerMaxTxReplacements": p.RedeemerMaxTxReplacements, "RedeemerMaxFeePerGas": p.RedeemerMaxFeePerGas, "MaxPendingTickets": p.MaxPendingTickets, "MaxTicketsPerRecipient": p.MaxTicketsPerRecipient})
 			}
 			if err := p.Validate(); err != nil {
 				return boa.NewUserInputError(err)
@@ -121,10 +137,18 @@ func Root(out, errOut io.Writer) *cobra.Command {
 	type storageParams struct {
 		ConfigFile string `persistent:"true" name:"config" configfile:"optional-default" basepath:"source" default:"config.toml" boa:"noconfig"`
 		nodeconfig.PersistentSettings
-		RedeemerDB string `persistent:"true" file:"optional" default:"tickets.sqlite"`
+		RedeemerDB               string   `persistent:"true" file:"optional" default:"tickets.sqlite"`
+		RedeemerDBBackend        string   `persistent:"true" default:"sqlite" alts:"sqlite,postgres" strict:"true"`
+		RedeemerPostgresURL      *url.URL `persistent:"true" name:"redeemer-postgres-url" secret:"true" optional:"true"`
+		RedeemerPostgresURLFile  string   `persistent:"true" basepath:"source" name:"redeemer-postgres-url-file" secretfor:"RedeemerPostgresURL" descr:"Owner-only file containing the PostgreSQL URL"`
+		RedeemerPostgresInsecure bool     `persistent:"true" optional:"true"`
+		RedeemerPostgresMaxConns int      `persistent:"true" default:"8" min:"2"`
 	}
 	storage := new(storageParams)
-	cmd.AddCommand(redemption.Command("redeemer", "tickets.sqlite"), migrations.Command(nodeconfig.Command("redeemer", nodeconfig.Mainnet, boa.Cmd[storageParams]{Params: storage}, &storage.ConfigFile), &storage.RedeemerDB, redemption.MigrationFiles, redemption.OpenDatabase))
+	open := func(ctx context.Context, path string, create bool) (*sql.DB, error) {
+		return redemption.Database{Backend: storage.RedeemerDBBackend, Path: path, PostgresURL: storage.RedeemerPostgresURL, PostgresInsecure: storage.RedeemerPostgresInsecure, PostgresMaxConns: storage.RedeemerPostgresMaxConns}.Open(ctx, create)
+	}
+	cmd.AddCommand(redemption.Command("redeemer", "tickets.sqlite"), migrations.Command(nodeconfig.Command("redeemer", nodeconfig.Mainnet, boa.Cmd[storageParams]{Params: storage}, &storage.ConfigFile), &storage.RedeemerDB, redemption.MigrationFiles, open))
 	cmd.SetOut(out)
 	cmd.SetErr(errOut)
 	cmd.SilenceUsage = true
@@ -168,7 +192,7 @@ func Serve(parent context.Context, p Params, logOut io.Writer) (result error) {
 		return fmt.Errorf("check dedicated redemption wallet: %w", err)
 	}
 	contracts.BeforeBroadcast = redemption.StandalonePolicy(chain, id)
-	store, err := redemption.OpenRedeemerDB(p.RedeemerDB)
+	store, err := p.Database().OpenStore(ctx)
 	if err != nil {
 		return err
 	}

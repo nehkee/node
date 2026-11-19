@@ -178,7 +178,7 @@ func TestServeProbesAndShutdown(t *testing.T) {
 
 func seedBusyQueue(t *testing.T, p Params) {
 	t.Helper()
-	store, err := redemption.OpenRedeemerDB(p.RedeemerDB)
+	store, err := p.Database().OpenStore(t.Context())
 	require.NoError(t, err)
 	defer store.Close()
 	require.NoError(t, store.Bind(t.Context(), redemption.Binding{ChainID: "1", Controller: *p.Controller, Role: "redeemer", Destination: "chain"}, redemption.DefaultLimits, nil))

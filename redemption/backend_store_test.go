@@ -7,13 +7,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/livepeer/node/internal/test"
 	"github.com/livepeer/node/nodeconfig/migrations"
 	"github.com/livepeer/node/pm"
 	"github.com/stretchr/testify/require"
@@ -148,17 +146,8 @@ func TestPostgresOwnershipAndConnectionInterruption(t *testing.T) {
 
 	// Terminating every session, including the ownership session, models a
 	// server restart or network partition. The owner reacquires the lock.
-	terminate := func() {
-		admin := postgresTestURL(t)
-		config, err := pgx.ParseConfig(admin.String())
-		require.NoError(t, err)
-		db := stdlib.OpenDB(*config)
-		defer db.Close()
-		_, err = db.ExecContext(t.Context(), "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()", strings.TrimPrefix(d.PostgresURL.Path, "/"))
-		require.NoError(t, err)
-	}
 	require.NoError(t, other.Close())
-	terminate()
+	test.TerminatePostgresSessions(t, d.PostgresURL)
 	var admitErr error
 	for attempt := range 3 {
 		if admitErr = s.Admit(t.Context(), first); admitErr == nil {

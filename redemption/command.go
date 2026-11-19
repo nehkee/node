@@ -17,12 +17,18 @@ import (
 type redemptionParams struct {
 	ConfigFile string `name:"config" configfile:"optional-default" basepath:"source" default:"config.toml" boa:"noconfig" descr:"Configuration file; empty disables discovery"`
 	nodeconfig.Settings
-	RedeemerDB string          `file:"true"  descr:"Existing recipient SQLite database"`
-	Retry      *ethcommon.Hash `name:"retry-transaction" boa:"noconfig" descr:"Rebroadcast the exact stored bytes for this transaction hash"`
-	Submit     bool            `optional:"true" boa:"noconfig,noenv" descr:"Explicitly authorize rebroadcast"`
-	RPCURL     *url.URL        `name:"rpc-url" secret:"true" optional:"true"`
-	RPCURLFile string          `basepath:"source" name:"rpc-url-file" secretfor:"RPCURL"`
-	ChainID    *uint64         `min:"1"`
+	RedeemerDB string `file:"true"  descr:"Existing recipient SQLite database"`
+	// Backend settings mirror the redeemer's; other components ignore them.
+	RedeemerDBBackend        string          `default:"sqlite" alts:"sqlite,postgres" strict:"true" descr:"Winning-ticket store backend"`
+	RedeemerPostgresURL      *url.URL        `name:"redeemer-postgres-url" secret:"true" optional:"true"`
+	RedeemerPostgresURLFile  string          `basepath:"source" name:"redeemer-postgres-url-file" secretfor:"RedeemerPostgresURL" descr:"Owner-only file containing the PostgreSQL URL"`
+	RedeemerPostgresInsecure bool            `optional:"true"`
+	RedeemerPostgresMaxConns int             `default:"8" min:"2"`
+	Retry                    *ethcommon.Hash `name:"retry-transaction" boa:"noconfig" descr:"Rebroadcast the exact stored bytes for this transaction hash"`
+	Submit                   bool            `optional:"true" boa:"noconfig,noenv" descr:"Explicitly authorize rebroadcast"`
+	RPCURL                   *url.URL        `name:"rpc-url" secret:"true" optional:"true"`
+	RPCURLFile               string          `basepath:"source" name:"rpc-url-file" secretfor:"RPCURL"`
+	ChainID                  *uint64         `min:"1"`
 }
 
 func (p redemptionParams) validateRetry() error {
@@ -54,6 +60,17 @@ func Command(component, defaultDB string) *cobra.Command {
 			retry := func() bool { return ctx.HasValue(&p.Retry) }
 			boa.Param(ctx, &p.RPCURL).SetIsEnabledFn(retry)
 			boa.Param(ctx, &p.RPCURLFile).SetIsEnabledFn(retry)
+			if component == "redeemer" {
+				// A PostgreSQL store has no SQLite file to require.
+				boa.Param(ctx, &p.RedeemerDB).SetIsEnabledFn(func() bool { return p.RedeemerDBBackend != BackendPostgres })
+			} else {
+				// Only the standalone redeemer supports PostgreSQL.
+				boa.Param(ctx, &p.RedeemerDBBackend).SetIgnored(true)
+				boa.Param(ctx, &p.RedeemerPostgresURL).SetIgnored(true)
+				boa.Param(ctx, &p.RedeemerPostgresURLFile).SetIgnored(true)
+				boa.Param(ctx, &p.RedeemerPostgresInsecure).SetIgnored(true)
+				boa.Param(ctx, &p.RedeemerPostgresMaxConns).SetIgnored(true)
+			}
 			return nil
 		},
 		PreValidateFunc: func(p *redemptionParams, _ *cobra.Command, _ []string) error {
@@ -81,7 +98,11 @@ func Command(component, defaultDB string) *cobra.Command {
 					return err
 				}
 			}
-			store, err := OpenRedeemerDB(p.RedeemerDB)
+			database := Database{Path: p.RedeemerDB}
+			if component == "redeemer" {
+				database = Database{Backend: p.RedeemerDBBackend, Path: p.RedeemerDB, PostgresURL: p.RedeemerPostgresURL, PostgresInsecure: p.RedeemerPostgresInsecure, PostgresMaxConns: p.RedeemerPostgresMaxConns}
+			}
+			store, err := database.OpenStore(cmd.Context())
 			if err != nil {
 				return err
 			}

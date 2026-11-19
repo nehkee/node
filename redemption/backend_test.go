@@ -1,21 +1,13 @@
 package redemption
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"net/url"
-	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/livepeer/node/internal/test"
 	"github.com/stretchr/testify/require"
 )
-
-// postgresTestEnv names a PostgreSQL URL whose role may CREATE DATABASE.
-// Each test gets a fresh database; without the variable PostgreSQL tests skip.
-const postgresTestEnv = "LIVEPEER_TEST_POSTGRES_URL"
 
 // testBackend selects the backend for shared store helpers. Tests in this
 // package are sequential, so runBackends may switch it per subtest.
@@ -23,37 +15,12 @@ var testBackend = BackendSQLite
 
 var testDatabases = map[*RedeemerDB]Database{}
 
-func postgresTestURL(t testing.TB) *url.URL {
-	t.Helper()
-	raw := os.Getenv(postgresTestEnv)
-	if raw == "" {
-		t.Skip(postgresTestEnv + " is not set")
-	}
-	u, err := url.Parse(raw)
-	require.NoError(t, err)
-	return u
-}
+func postgresTestURL(t testing.TB) *url.URL { return test.PostgresURL(t) }
 
 // newPostgresTestDatabase provisions an empty database and drops it afterwards.
 func newPostgresTestDatabase(t testing.TB) Database {
 	t.Helper()
-	admin := postgresTestURL(t)
-	config, err := pgx.ParseConfig(admin.String())
-	require.NoError(t, err)
-	db := stdlib.OpenDB(*config)
-	t.Cleanup(func() { _ = db.Close() })
-	suffix := make([]byte, 6)
-	_, _ = rand.Read(suffix)
-	name := "lp_redemption_" + hex.EncodeToString(suffix)
-	_, err = db.ExecContext(t.Context(), "CREATE DATABASE "+name)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, err := db.Exec("DROP DATABASE IF EXISTS " + name + " WITH (FORCE)")
-		require.NoError(t, err)
-	})
-	u := *admin
-	u.Path = "/" + name
-	return Database{Backend: BackendPostgres, PostgresURL: &u, PostgresMaxConns: 4}
+	return Database{Backend: BackendPostgres, PostgresURL: test.PostgresDatabase(t), PostgresMaxConns: 4}
 }
 
 func testDatabase(t testing.TB) Database {
