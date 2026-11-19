@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/livepeer/node/internal/sqldialect"
 )
 
 var migrationName = regexp.MustCompile(`^([0-9]{3,})_[a-z0-9_]+\.sql$`)
@@ -29,7 +31,33 @@ type migration struct {
 	up, down string
 }
 
+// PostgreSQL migration history uses the same columns. A transaction-scoped
+// advisory lock serializes concurrent appliers; DDL there is transactional.
+const postgresTable = `CREATE TABLE IF NOT EXISTS migrations (
+ version INTEGER PRIMARY KEY CHECK(version > 0),
+ filename TEXT NOT NULL UNIQUE,
+ sha256 TEXT NOT NULL CHECK(sha256 ~ '^[0-9a-f]{64}$'),
+ applied_at_ms BIGINT NOT NULL
+)`
+
+// migrationLock is an arbitrary advisory-lock key pair ("LPMG", 1).
+const migrationLock = `SELECT pg_advisory_xact_lock(1280331079,1)`
+
 func initTable(ctx context.Context, db *sql.DB) error {
+	if sqldialect.Of(db) == sqldialect.PostgreSQL {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err = tx.ExecContext(ctx, migrationLock); err == nil {
+			_, err = tx.ExecContext(ctx, postgresTable)
+		}
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
 	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS migrations (
  version INTEGER PRIMARY KEY CHECK(version > 0),
  filename TEXT NOT NULL UNIQUE,
@@ -84,7 +112,11 @@ func List(ctx context.Context, db *sql.DB, files fs.FS) ([]Status, error) {
 		return nil, err
 	}
 	var exists int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='migrations'`).Scan(&exists); err != nil {
+	introspect := `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='migrations'`
+	if sqldialect.Of(db) == sqldialect.PostgreSQL {
+		introspect = `SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname=current_schema() AND tablename='migrations'`
+	}
+	if err := db.QueryRowContext(ctx, introspect).Scan(&exists); err != nil {
 		return nil, err
 	}
 	if exists == 0 {
@@ -198,13 +230,19 @@ func Down(ctx context.Context, db *sql.DB, files fs.FS) error {
 }
 
 func apply(ctx context.Context, db *sql.DB, item migration, down bool) error {
+	dialect := sqldialect.Of(db)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if dialect == sqldialect.PostgreSQL {
+		if _, err := tx.ExecContext(ctx, migrationLock); err != nil {
+			return err
+		}
+	}
 	var present int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM migrations WHERE version=?`, item.Version).Scan(&present); err != nil {
+	if err := tx.QueryRowContext(ctx, dialect.Rebind(`SELECT count(*) FROM migrations WHERE version=?`), item.Version).Scan(&present); err != nil {
 		return err
 	}
 	if (!down && present != 0) || (down && present == 0) {
@@ -218,7 +256,9 @@ func apply(ctx context.Context, db *sql.DB, item migration, down bool) error {
 		return fmt.Errorf("migration %s: %w", item.Filename, err)
 	}
 	if down {
-		_, err = tx.ExecContext(ctx, `DELETE FROM migrations WHERE version=?`, item.Version)
+		_, err = tx.ExecContext(ctx, dialect.Rebind(`DELETE FROM migrations WHERE version=?`), item.Version)
+	} else if dialect == sqldialect.PostgreSQL {
+		_, err = tx.ExecContext(ctx, `INSERT INTO migrations(version,filename,sha256,applied_at_ms) VALUES ($1,$2,$3,CAST(extract(epoch FROM clock_timestamp())*1000 AS BIGINT))`, item.Version, item.Filename, item.SHA256)
 	} else {
 		_, err = tx.ExecContext(ctx, `INSERT INTO migrations(version,filename,sha256,applied_at_ms) VALUES (?,?,?,CAST(unixepoch('subsec')*1000 AS INTEGER))`, item.Version, item.Filename, item.SHA256)
 	}

@@ -6,25 +6,28 @@ import (
 	"encoding/json"
 	"io/fs"
 
+	"github.com/livepeer/node/internal/sqldialect"
+
 	"github.com/j0sh/boa/pkg/boa"
 	"github.com/spf13/cobra"
 )
 
 // Command creates migration subcommands for files containing migrations/*.sql.
+// When open returns a PostgreSQL handle, the catalog is postgres/migrations/*.sql.
 // Config parameters used by subcommands must be persistent.
 // open must not run migrations. Only up requests creation; Command closes the database.
 func Command[P any](config boa.Cmd[P], path *string, files fs.FS, open func(context.Context, string, bool) (*sql.DB, error)) *cobra.Command {
 	run := func(_ *boa.NoParams, cmd *cobra.Command, _ []string) error {
-		catalog, err := fs.Sub(files, "migrations")
-		if err != nil {
-			return err
-		}
 		ctx := cmd.Context()
 		db, err := open(ctx, *path, cmd.Name() == "up")
 		if err != nil {
 			return err
 		}
 		defer db.Close()
+		catalog, err := fs.Sub(files, Dir(db))
+		if err != nil {
+			return err
+		}
 		switch cmd.Name() {
 		case "up":
 			err = Up(ctx, db, catalog)
@@ -49,4 +52,12 @@ func Command[P any](config boa.Cmd[P], path *string, files fs.FS, open func(cont
 		boa.Cmd[boa.NoParams]{Use: "status", Short: "Inspect migration status", Args: cobra.NoArgs, RunFuncE: run},
 	)
 	return config.ToCobra()
+}
+
+// Dir names the catalog directory for db's backend within an embedded tree.
+func Dir(db *sql.DB) string {
+	if sqldialect.Of(db) == sqldialect.PostgreSQL {
+		return "postgres/migrations"
+	}
+	return "migrations"
 }
