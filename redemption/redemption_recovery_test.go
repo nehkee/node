@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +45,7 @@ func (f *recoveryRPC) CollateralSnapshot() eth.ChainSnapshot {
 
 func (f *recoveryRPC) store(t *testing.T, id byte) (*RedeemerDB, *pm.SignedTicket) {
 	t.Helper()
-	store, err := OpenRedeemerDB(filepath.Join(t.TempDir(), "payments.sqlite"))
+	store, err := openTestRedeemerDB(t)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	ticket := &pm.SignedTicket{Ticket: &pm.Ticket{PayerAddress: common.HexToAddress("0x1234"), Recipient: common.HexToAddress("0x5678"), FaceValue: big.NewInt(1000), WinProb: big.NewInt(100), TicketNonce: 1, RecipientRandHash: crypto.Keccak256Hash([]byte{id}), CreationRound: 1, CreationRoundBlockHash: common.HexToHash("0x1"), ParamsExpirationBlock: big.NewInt(10)}, Sig: []byte{id, 2, 3}, RecipientRand: big.NewInt(int64(id))}
@@ -235,7 +234,7 @@ func TestRedemptionReplacementFailuresRemainQueued(t *testing.T) {
 				c.Contracts.MaxFeePerGas = big.NewInt(210)
 			}
 			if scenario == "persistence" {
-				_, err := s.db.Exec(`CREATE TRIGGER reject_replacement BEFORE INSERT ON redemption_transactions WHEN NEW.replaces_hash IS NOT NULL BEGIN SELECT RAISE(ABORT,'storage failure'); END`)
+				err := failWrites(t, s, "reject_replacement", "INSERT", "redemption_transactions", `NEW.replaces_hash IS NOT NULL`, "storage failure")
 				require.NoError(t, err)
 			}
 			recoveryWorker(t, s, c, key, options)
@@ -316,8 +315,9 @@ func TestUsedTicketGuardRecoversAfterReorg(t *testing.T) {
 
 func reopenRecoveryStore(t *testing.T, s *RedeemerDB) *RedeemerDB {
 	t.Helper()
+	database := testDatabaseOf(t, s)
 	require.NoError(t, s.Close())
-	next, err := OpenRedeemerDB(s.path)
+	next, err := openTestDatabase(t, database)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, next.Close()) })
 	return next
@@ -563,11 +563,11 @@ func TestOrphanedInclusionRecoversSameNonce(t *testing.T) {
 
 func TestRedemptionPersistencePreventsInitialSend(t *testing.T) {
 	f, s, _, c, key := newRecoveryTest(t, 14)
-	_, err := s.db.Exec(`CREATE TRIGGER reject_identity BEFORE INSERT ON redemption_transactions BEGIN SELECT RAISE(ABORT,'storage unavailable'); END`)
+	err := failWrites(t, s, "reject_identity", "INSERT", "redemption_transactions", ``, "storage unavailable")
 	require.NoError(t, err)
 	require.NotEmpty(t, processRecovery(t, s, c, key))
 	require.Empty(t, f.Transactions())
-	_, err = s.db.Exec("DROP TRIGGER reject_identity")
+	err = allowWrites(t, s, "reject_identity", "redemption_transactions")
 	require.NoError(t, err)
 	tickRecovery(t, s, c, key)
 	require.EqualValues(t, 0, f.Transactions()[0].Nonce())
@@ -823,13 +823,15 @@ func TestLiveAcknowledgementRestoresNonce(t *testing.T) {
 			if mode != "finalized" {
 				retryStore := s
 				if mode == "manual-external-handle" {
-					var seq int
-					var name, path string
-					require.NoError(t, s.db.QueryRow("PRAGMA database_list").Scan(&seq, &name, &path))
 					var err error
-					retryStore, err = OpenRedeemerDB(path)
+					retryStore, err = openTestDatabase(t, testDatabaseOf(t, s))
 					require.NoError(t, err)
 					t.Cleanup(func() { require.NoError(t, retryStore.Close()) })
+					if testBackend == BackendPostgres {
+						// PostgreSQL fences writers to the process that owns the database.
+						require.ErrorIs(t, RetryRedemption(t.Context(), retryStore, c.Contracts, first.Hash()), ErrDatabaseOwned)
+						retryStore = s
+					}
 				}
 				require.NoError(t, RetryRedemption(t.Context(), retryStore, c.Contracts, first.Hash()))
 			} else {
@@ -860,11 +862,11 @@ func TestUsedTransitionRecoversAfterStorageFailure(t *testing.T) {
 	f.Mu.Lock()
 	f.Used[ticket.Hash()] = true
 	f.Mu.Unlock()
-	_, err := s.db.Exec(`CREATE TRIGGER fail_settlement BEFORE UPDATE OF redeemed_at ON winning_tickets BEGIN SELECT RAISE(ABORT,'injected settlement failure'); END`)
+	err := failWrites(t, s, "fail_settlement", "UPDATE OF redeemed_at", "winning_tickets", ``, "injected settlement failure")
 	require.NoError(t, err)
 	require.NotEmpty(t, processRecovery(t, s, c, key))
 	require.Equal(t, "retryable", ticketPhase(t, s, ticket.Sig), "failed settlement must roll back the terminal summary")
-	_, err = s.db.Exec("DROP TRIGGER fail_settlement")
+	err = allowWrites(t, s, "fail_settlement", "winning_tickets")
 	require.NoError(t, err)
 	s = reopenRecoveryStore(t, s)
 	tickRecovery(t, s, c, key)
@@ -964,7 +966,7 @@ func TestRedemptionCallbackObservations(t *testing.T) {
 			f.Finalized = false
 			f.MineAfter = 1
 			if failCommit {
-				_, err := s.db.Exec(`CREATE TRIGGER fail_mined BEFORE UPDATE OF phase ON redemption_attempts WHEN NEW.phase='mined' BEGIN SELECT RAISE(ABORT,'storage failure'); END`)
+				err := failWrites(t, s, "fail_mined", "UPDATE OF phase", "redemption_attempts", `NEW.phase='mined'`, "storage failure")
 				require.NoError(t, err)
 			}
 			recoveryWorker(t, s, c, key, RedemptionOptions{Timeout: time.Hour, MaxReplacements: 0})
@@ -975,7 +977,7 @@ func TestRedemptionCallbackObservations(t *testing.T) {
 			if failCommit {
 				require.NotEqual(t, "mined", ticketPhase(t, s, ticket.Sig))
 				require.Zero(t, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "mined"}))
-				_, err := s.db.Exec(`DROP TRIGGER fail_mined`)
+				err := allowWrites(t, s, "fail_mined", "redemption_attempts")
 				require.NoError(t, err)
 				require.NoError(t, s.recovery.recordResult(t.Context(), result))
 			}
@@ -1003,7 +1005,7 @@ func TestCollateralWatermarkSurvivesSettlementAndRestart(t *testing.T) {
 		return store.StoreWinningTickets(t.Context(), ticket.PayerAddress, next.RecipientRandHash, new(big.Int).Set(ticket.FaceValue), []*pm.SignedTicket{next}, snapshot)
 	}
 	require.ErrorContains(t, store.finishTicket(t.Context(), ticket.Sig, "used", ""), "block evidence required")
-	_, err := store.db.Exec(`CREATE TRIGGER fail_settlement BEFORE UPDATE OF redeemed_at ON winning_tickets BEGIN SELECT RAISE(ABORT,'storage failure'); END`)
+	err := failWrites(t, store, "fail_settlement", "UPDATE OF redeemed_at", "winning_tickets", ``, "storage failure")
 	require.NoError(t, err)
 	require.Error(t, store.finishTicket(t.Context(), ticket.Sig, "used", "", settled))
 	var floors, redeemed int
@@ -1012,7 +1014,7 @@ func TestCollateralWatermarkSurvivesSettlementAndRestart(t *testing.T) {
 	require.NoError(t, store.db.QueryRow(`SELECT count(*) FROM winning_tickets WHERE redeemed_at IS NOT NULL`).Scan(&redeemed))
 	require.Zero(t, redeemed)
 	require.ErrorIs(t, admit(captured), pm.ErrPayerUnavailable, "failed settlement retains liability")
-	_, err = store.db.Exec(`DROP TRIGGER fail_settlement`)
+	err = allowWrites(t, store, "fail_settlement", "winning_tickets")
 	require.NoError(t, err)
 	// The funds observation was captured while the old winner still reserved its
 	// face value. Settlement can release it before this admission transaction starts.

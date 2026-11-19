@@ -49,7 +49,7 @@ func signTicket(t *testing.T, ticket *pm.SignedTicket, key *ecdsa.PrivateKey) {
 
 func boundStore(t *testing.T, role, target string, limits Limits) (*RedeemerDB, Binding) {
 	t.Helper()
-	s, err := OpenRedeemerDB(filepath.Join(t.TempDir(), "tickets.sqlite"))
+	s, err := openTestRedeemerDB(t)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
 	b := Binding{ChainID: "1", Controller: common.HexToAddress("0x1000"), Role: role, Destination: target}
@@ -271,11 +271,9 @@ func TestRemoteDeliveryLostAcknowledgmentAndKeylessSettlement(t *testing.T) {
 			require.NoError(t, s.db.QueryRow("SELECT exposed,delivery FROM ticket_state").Scan(&exposed, &delivery))
 			require.Equal(t, 1, exposed)
 			require.Equal(t, "retryable", delivery)
-			var seq int
-			var name, path string
-			require.NoError(t, s.db.QueryRow("PRAGMA database_list").Scan(&seq, &name, &path))
+			database := testDatabaseOf(t, s)
 			require.NoError(t, s.Close())
-			s, err = OpenRedeemerDB(path)
+			s, err = openTestDatabase(t, database)
 			require.NoError(t, err)
 			defer s.Close()
 			require.NoError(t, s.Bind(t.Context(), b, DefaultLimits, nil))

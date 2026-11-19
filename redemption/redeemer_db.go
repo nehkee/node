@@ -27,7 +27,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-//go:embed migrations/*.sql
+// MigrationFiles holds the SQLite catalog in migrations/ and the PostgreSQL
+// catalog in postgres/migrations/. Both are checksummed once applied.
+//
+//go:embed migrations/*.sql postgres/migrations/*.sql
 var MigrationFiles embed.FS
 
 // RedeemerDB owns the shared durable winning-ticket queue,
@@ -36,7 +39,7 @@ type RedeemerDB struct {
 	logger         *slog.Logger
 	metrics        *observability.Metrics
 	snapshot       func() (eth.ChainSnapshot, bool)
-	db             *sql.DB
+	db             *sqlDB
 	admission      *sql.Stmt
 	recoveryMu     sync.Mutex
 	recovery       *redemptionRecovery
@@ -51,7 +54,7 @@ type RedeemerDB struct {
 // older work. Advance only when processing reaches a row, before its RPC work.
 type scanCursor struct{ after, through atomic.Int64 }
 
-func (c *scanCursor) bounds(ctx context.Context, db *sql.DB) (int64, int64, error) {
+func (c *scanCursor) bounds(ctx context.Context, db *sqlDB) (int64, int64, error) {
 	end := c.through.Load()
 	if end == 0 {
 		if err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(rowid),0) FROM redemption_transactions").Scan(&end); err != nil {
@@ -78,24 +81,28 @@ func OpenRedeemerDB(path string) (*RedeemerDB, error) {
 	return NewStore(db)
 }
 
-// NewStore takes ownership of db and initializes the shared migration catalog.
-func NewStore(db *sql.DB) (*RedeemerDB, error) {
+// NewStore takes ownership of db and initializes the migration catalog for
+// its backend (SQLite or PostgreSQL).
+func NewStore(raw *sql.DB) (*RedeemerDB, error) {
 	ctx := context.Background()
+	db := newSQLDB(raw)
 	var err error
-	files, err := fs.Sub(MigrationFiles, "migrations")
+	files, err := fs.Sub(MigrationFiles, migrations.Dir(raw))
 	if err == nil {
-		err = migrations.Up(ctx, db, files)
+		err = migrations.Up(ctx, raw, files)
 	}
 	if err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("initialize redeemer SQLite: %w", err)
+		return nil, fmt.Errorf("initialize redeemer %s: %w", db.dialect, err)
 	}
 	store := &RedeemerDB{db: db, limits: DefaultLimits}
-	var seq int
-	var name string
-	if err := db.QueryRowContext(ctx, "PRAGMA database_list").Scan(&seq, &name, &store.path); err != nil {
-		_ = db.Close()
-		return nil, err
+	if !db.postgres() {
+		var seq int
+		var name string
+		if err := db.QueryRowContext(ctx, "PRAGMA database_list").Scan(&seq, &name, &store.path); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 	store.admission, err = db.PrepareContext(ctx, receiptAdmissionQuery)
 	if err != nil {
@@ -191,9 +198,9 @@ func (s *RedeemerDB) StoreWinningTicket(t *pm.SignedTicket) error {
 	return tx.Commit()
 }
 
-const receiptAdmissionQuery = `SELECT m.number,m.hash,EXISTS(SELECT 1 FROM winning_tickets w JOIN redemption_attempts a ON a.sig=w.sig WHERE w.recipient_rand_hash=?1 AND (a.phase!='expired' OR EXISTS(SELECT 1 FROM redemption_transactions t WHERE t.sig=w.sig)))
- OR EXISTS(SELECT 1 FROM winning_tickets w JOIN ticket_state t ON t.hash=w.ticket_hash WHERE w.recipient_rand_hash=?1 AND t.exposed=1)
- FROM (SELECT 1) LEFT JOIN collateral_watermark m ON m.id=1`
+const receiptAdmissionQuery = `SELECT m.number,m.hash,CASE WHEN EXISTS(SELECT 1 FROM winning_tickets w JOIN redemption_attempts a ON a.sig=w.sig WHERE w.recipient_rand_hash=?1 AND (a.phase!='expired' OR EXISTS(SELECT 1 FROM redemption_transactions t WHERE t.sig=w.sig)))
+ OR EXISTS(SELECT 1 FROM winning_tickets w JOIN ticket_state t ON t.hash=w.ticket_hash WHERE w.recipient_rand_hash=?1 AND t.exposed=1) THEN 1 ELSE 0 END
+ FROM (SELECT 1) AS one LEFT JOIN collateral_watermark m ON m.id=1`
 
 // StoreWinningTickets commits a validated receipt batch before the payment
 // engine publishes replay guards or credit. Check exposure and liability in the

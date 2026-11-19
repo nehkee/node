@@ -220,7 +220,7 @@ func (r *redemptionRecovery) recordResult(ctx context.Context, result *eth.Trans
 	if err != nil {
 		return err
 	}
-	summaryResult, err := tx.ExecContext(ctx, `UPDATE redemption_attempts SET phase=?,error=? WHERE phase IN ('prepared','broadcast','submitted','mined') AND (phase!=? OR error IS NOT ?) AND sig IN (SELECT sig FROM redemption_transactions WHERE root_hash=?) AND EXISTS(SELECT 1 FROM winning_tickets w JOIN redemption_transactions t ON t.hash=w.tx_hash WHERE w.sig=redemption_attempts.sig AND t.root_hash=?)`, phase, message, phase, message, root, root)
+	summaryResult, err := tx.ExecContext(ctx, `UPDATE redemption_attempts SET phase=?,error=? WHERE phase IN ('prepared','broadcast','submitted','mined') AND (phase!=? OR error IS DISTINCT FROM ?) AND sig IN (SELECT sig FROM redemption_transactions WHERE root_hash=?) AND EXISTS(SELECT 1 FROM winning_tickets w JOIN redemption_transactions t ON t.hash=w.tx_hash WHERE w.sig=redemption_attempts.sig AND t.root_hash=?)`, phase, message, phase, message, root, root)
 	if err != nil {
 		return err
 	}

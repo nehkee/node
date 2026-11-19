@@ -102,14 +102,18 @@ type RedemptionStatus struct {
 
 func (s *RedeemerDB) Redemptions() ([]RedemptionStatus, error) {
 	// Legacy redeemed_at backfills have no label; their settled outcome is use.
+	hex := `lower(hex(hash))`
+	if s.db.postgres() {
+		hex = `encode(hash,'hex')`
+	}
 	query := `WITH represented AS (
  SELECT * FROM ticket_state s WHERE (delivery!='queued' OR settled=1) AND NOT EXISTS(SELECT 1 FROM redemption_transactions t JOIN winning_tickets w ON w.sig=t.sig WHERE w.ticket_hash=s.hash)
 ) SELECT hash,phase,error FROM (
  SELECT hash,CASE WHEN phase='sending' THEN 'broadcast' ELSE phase END AS phase,COALESCE(error,'') AS error,rowid AS sequence FROM redemption_transactions
- UNION ALL SELECT '0x'||lower(hex(hash)),CASE WHEN settled=1 THEN COALESCE(NULLIF(settlement,''),'used') ELSE delivery END,'',9223372036854775806 FROM represented
+ UNION ALL SELECT '0x'||` + hex + `,CASE WHEN settled=1 THEN COALESCE(NULLIF(settlement,''),'used') ELSE delivery END,'',9223372036854775806 FROM represented
  UNION ALL SELECT '',phase,COALESCE(error,''),9223372036854775807 FROM redemption_attempts a
  WHERE (a.phase IN ('used','awaiting_finality') OR NOT EXISTS(SELECT 1 FROM redemption_transactions t WHERE t.sig=a.sig))
- AND NOT EXISTS(SELECT 1 FROM represented s JOIN winning_tickets w ON w.ticket_hash=s.hash WHERE w.sig=a.sig)) ORDER BY sequence`
+ AND NOT EXISTS(SELECT 1 FROM represented s JOIN winning_tickets w ON w.ticket_hash=s.hash WHERE w.sig=a.sig)) AS items ORDER BY sequence`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -206,7 +210,7 @@ func broadcastSavedRedemption(ctx context.Context, store *RedeemerDB, contracts 
 		return errors.Join(sendErr, err)
 	}
 	defer tx.Rollback()
-	result, err = tx.Exec(`UPDATE redemption_transactions SET phase=?,error=?,acknowledged=max(acknowledged,?) WHERE hash=? AND phase=?`, phase, message, ack, identity.Hash.Hex(), claimedPhase)
+	result, err = tx.Exec(`UPDATE redemption_transactions SET phase=?,error=?,acknowledged=CASE WHEN ?=1 THEN 1 ELSE acknowledged END WHERE hash=? AND phase=?`, phase, message, ack, identity.Hash.Hex(), claimedPhase)
 	var summaryResult sql.Result
 	if err == nil {
 		summaryResult, err = tx.Exec(`UPDATE redemption_attempts SET phase=?,error=? WHERE sig=? AND phase='broadcast' AND EXISTS(SELECT 1 FROM winning_tickets WHERE sig=? AND tx_hash=?)`, phase, message, sig, sig, identity.Hash.Hex())
@@ -251,7 +255,7 @@ func (s *RedeemerDB) finishTicket(ctx context.Context, sig []byte, phase string,
 			return errors.New("settlement block evidence required")
 		}
 		block := observation[0]
-		if _, err := tx.ExecContext(ctx, `INSERT INTO collateral_watermark(id,number,hash) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET number=excluded.number,hash=excluded.hash WHERE number<excluded.number`, block.Number.Int64(), block.BlockHash.Hex()); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO collateral_watermark(id,number,hash) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET number=excluded.number,hash=excluded.hash WHERE collateral_watermark.number<excluded.number`, block.Number.Int64(), block.BlockHash.Hex()); err != nil {
 			return err
 		}
 		var number int64

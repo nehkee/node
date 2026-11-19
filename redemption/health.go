@@ -10,7 +10,7 @@ func (s *RedeemerDB) CheckStorage(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE winning_tickets SET enqueued_at=enqueued_at WHERE 0`); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE winning_tickets SET enqueued_at=enqueued_at WHERE 1=0`); err != nil {
 		return err
 	}
 	return tx.Rollback()

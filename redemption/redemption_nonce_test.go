@@ -29,11 +29,11 @@ func TestDroppedRedemptionRefillsNonceAfterRestart(t *testing.T) {
 			}
 			// A failed claim must prevent both the saved-byte replay and any fresh
 			// higher nonce. Restart retains the original timestamp and identity.
-			_, err := s.db.Exec(`CREATE TRIGGER reject_gap_send BEFORE UPDATE OF phase ON redemption_transactions BEGIN SELECT RAISE(ABORT,'injected persistence failure'); END`)
+			err := failWrites(t, s, "reject_gap_send", "UPDATE OF phase", "redemption_transactions", ``, "injected persistence failure")
 			require.NoError(t, err)
 			require.NotEmpty(t, processRecovery(t, s, c, key))
 			require.Len(t, f.Transactions(), 1)
-			_, err = s.db.Exec("DROP TRIGGER reject_gap_send")
+			err = allowWrites(t, s, "reject_gap_send", "redemption_transactions")
 			require.NoError(t, err)
 			tickRecovery(t, s, c, key)
 			sent := f.Transactions()
@@ -81,14 +81,14 @@ func TestClosedTicketRepairsSupersededHigherNonce(t *testing.T) {
 	remote := Binding{ChainID: "1", Controller: c.Contracts.Controller, Role: "orchestrator", Destination: "http://redeemer.example"}
 	require.ErrorContains(t, s.Bind(t.Context(), remote, DefaultLimits, c), "drain local signed", "settlement did not consume the superseded higher nonce")
 	// Crash after replay submission but before recording its acknowledgment.
-	_, err := s.db.Exec(`CREATE TRIGGER reject_gap_ack BEFORE UPDATE OF acknowledged ON redemption_transactions BEGIN SELECT RAISE(ABORT,'injected acknowledgment failure'); END`)
+	err := failWrites(t, s, "reject_gap_ack", "UPDATE OF acknowledged", "redemption_transactions", ``, "injected acknowledgment failure")
 	require.NoError(t, err)
 	require.NotEmpty(t, processRecovery(t, s, c, key))
 	s = reopenRecoveryStore(t, s)
 	var interrupted string
 	require.NoError(t, s.db.QueryRow("SELECT phase FROM redemption_transactions WHERE hash=?", sent[1].Hash().Hex()).Scan(&interrupted))
 	require.Equal(t, "superseded", interrupted, "the recorded historical outcome must survive interrupted replay")
-	_, err = s.db.Exec("DROP TRIGGER reject_gap_ack")
+	err = allowWrites(t, s, "reject_gap_ack", "redemption_transactions")
 	require.NoError(t, err)
 	f.Mu.Lock()
 	delete(f.Pool, 1)

@@ -115,7 +115,7 @@ func (s *RedeemerDB) Bind(ctx context.Context, b Binding, limits Limits, chain N
 
 // Ticket settlement does not consume every signed nonce. Only finalized
 // same-nonce inclusion or a finalized account count proves drainage.
-func checkNonceDrain(ctx context.Context, tx *sql.Tx, chain NonceReader) error {
+func checkNonceDrain(ctx context.Context, tx *sqlTx, chain NonceReader) error {
 	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT t.redeemer_address,t.nonce FROM redemption_transactions t WHERE NOT EXISTS(SELECT 1 FROM redemption_transactions proof WHERE proof.redeemer_address=t.redeemer_address AND proof.nonce=t.nonce AND proof.phase IN ('confirmed','reverted'))`)
 	if err != nil {
 		return err
@@ -197,7 +197,7 @@ func (s *RedeemerDB) backfill(ctx context.Context) error {
 	}
 }
 
-func recordIdentity(ctx context.Context, tx *sql.Tx, t *pm.SignedTicket) error {
+func recordIdentity(ctx context.Context, tx *sqlTx, t *pm.SignedTicket) error {
 	hash := t.Hash()
 	_, err := tx.ExecContext(ctx, "INSERT INTO ticket_state(hash,sig) VALUES(?,?) ON CONFLICT(hash) DO NOTHING", hash.Bytes(), t.Sig)
 	if err != nil {
@@ -208,11 +208,12 @@ func recordIdentity(ctx context.Context, tx *sql.Tx, t *pm.SignedTicket) error {
 		return err
 	}
 	// Existing aliases and transaction histories are retained, never rewritten.
-	_, err = tx.ExecContext(ctx, `UPDATE ticket_state SET exposed=MAX(exposed,EXISTS(SELECT 1 FROM winning_tickets w JOIN redemption_attempts a ON a.sig=w.sig WHERE w.ticket_hash=ticket_state.hash AND (a.phase!='expired' OR EXISTS(SELECT 1 FROM redemption_transactions t WHERE t.sig=w.sig)))),settled=MAX(settled,EXISTS(SELECT 1 FROM winning_tickets w WHERE w.ticket_hash=ticket_state.hash AND w.redeemed_at IS NOT NULL)) WHERE hash=?`, hash.Bytes())
+	// Flags are 0 or 1; CASE keeps the SQLite MAX() semantics portably.
+	_, err = tx.ExecContext(ctx, `UPDATE ticket_state SET exposed=CASE WHEN EXISTS(SELECT 1 FROM winning_tickets w JOIN redemption_attempts a ON a.sig=w.sig WHERE w.ticket_hash=ticket_state.hash AND (a.phase!='expired' OR EXISTS(SELECT 1 FROM redemption_transactions t WHERE t.sig=w.sig))) THEN 1 ELSE exposed END,settled=CASE WHEN EXISTS(SELECT 1 FROM winning_tickets w WHERE w.ticket_hash=ticket_state.hash AND w.redeemed_at IS NOT NULL) THEN 1 ELSE settled END WHERE hash=?`, hash.Bytes())
 	return err
 }
 
-func insertTicket(ctx context.Context, tx *sql.Tx, t *pm.SignedTicket) error {
+func insertTicket(ctx context.Context, tx *sqlTx, t *pm.SignedTicket) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO winning_tickets(`+ticketColumns+`,enqueued_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, t.PayerAddress.Hex(), t.Recipient.Hex(), t.FaceValue.Bytes(), t.WinProb.Bytes(), t.TicketNonce, common.LeftPadBytes(t.RecipientRand.Bytes(), 32), t.RecipientRandHash.Hex(), t.Sig, t.CreationRound, t.CreationRoundBlockHash.Hex(), t.ParamsExpirationBlock.String(), time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return err
@@ -220,9 +221,9 @@ func insertTicket(ctx context.Context, tx *sql.Tx, t *pm.SignedTicket) error {
 	return recordIdentity(ctx, tx, t)
 }
 
-func (s *RedeemerDB) capacity(ctx context.Context, tx *sql.Tx, recipient common.Address, additional int) error {
+func (s *RedeemerDB) capacity(ctx context.Context, tx *sqlTx, recipient common.Address, additional int) error {
 	var total, local int
-	err := tx.QueryRowContext(ctx, `SELECT count(*),COALESCE(sum(w.recipient=?),0) FROM ticket_state t JOIN winning_tickets w ON w.sig=t.sig WHERE t.settled=0`, recipient.Hex()).Scan(&total, &local)
+	err := tx.QueryRowContext(ctx, `SELECT count(*),COALESCE(sum(CASE WHEN w.recipient=? THEN 1 ELSE 0 END),0) FROM ticket_state t JOIN winning_tickets w ON w.sig=t.sig WHERE t.settled=0`, recipient.Hex()).Scan(&total, &local)
 	if err != nil {
 		return err
 	}
@@ -339,7 +340,11 @@ func (s *RedeemerDB) delivery(ctx context.Context, t *pm.SignedTicket, phase str
 	if phase == "acknowledged" || phase == "rejected" {
 		delay = 15 * time.Second
 	}
-	_, err := s.db.ExecContext(ctx, "UPDATE ticket_state SET delivery=?,exposed=MAX(exposed,?),failures=?,next_attempt=? WHERE hash=? AND settled=0", phase, phase == "sending" || phase == "acknowledged", failures, time.Now().Add(delay).UnixMilli(), t.Hash().Bytes())
+	exposed := 0
+	if phase == "sending" || phase == "acknowledged" {
+		exposed = 1
+	}
+	_, err := s.db.ExecContext(ctx, "UPDATE ticket_state SET delivery=?,exposed=CASE WHEN ?=1 THEN 1 ELSE exposed END,failures=?,next_attempt=? WHERE hash=? AND settled=0", phase, exposed, failures, time.Now().Add(delay).UnixMilli(), t.Hash().Bytes())
 	if err == nil {
 		s.observeTransition(phase, "", nil)
 	}
@@ -358,7 +363,7 @@ func (s *RedeemerDB) UnsettledLiability(ctx context.Context, payer common.Addres
 	return s.unsettledLiability(ctx, tx, payer)
 }
 
-func (s *RedeemerDB) unsettledLiability(ctx context.Context, tx *sql.Tx, payer common.Address) (*big.Int, error) {
+func (s *RedeemerDB) unsettledLiability(ctx context.Context, tx *sqlTx, payer common.Address) (*big.Int, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT w.face_value FROM ticket_state t JOIN winning_tickets w ON w.sig=t.sig WHERE w.payer_address=? AND w.redeemed_at IS NULL AND t.settled=0`, payer.Hex())
 	if err != nil {
 		return nil, err
@@ -396,7 +401,7 @@ func (f *ticketFields) ticket() (*pm.SignedTicket, error) {
 // CapacityAvailable reports admission backpressure without evicting retained work.
 func (s *RedeemerDB) CapacityAvailable(ctx context.Context, recipient common.Address) (bool, error) {
 	var total, local int
-	err := s.db.QueryRowContext(ctx, `SELECT count(*),COALESCE(sum(w.recipient=?),0) FROM ticket_state t JOIN winning_tickets w ON w.sig=t.sig WHERE t.settled=0`, recipient.Hex()).Scan(&total, &local)
+	err := s.db.QueryRowContext(ctx, `SELECT count(*),COALESCE(sum(CASE WHEN w.recipient=? THEN 1 ELSE 0 END),0) FROM ticket_state t JOIN winning_tickets w ON w.sig=t.sig WHERE t.settled=0`, recipient.Hex()).Scan(&total, &local)
 	return err == nil && total < s.limits.Pending && (recipient == (common.Address{}) || local < s.limits.PerRecipient), err
 }
 

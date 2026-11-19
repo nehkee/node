@@ -295,9 +295,9 @@ func TestWithheldReplacementPreservesPendingTicket(t *testing.T) {
 			require.NoError(t, s.db.QueryRow("SELECT count(*) FROM redemption_transactions").Scan(&identities))
 			require.Equal(t, 1, identities, "a withheld replacement cannot reopen the ticket at another nonce")
 
-			path := s.path
+			database := testDatabaseOf(t, s)
 			require.NoError(t, s.Close())
-			s, err = OpenRedeemerDB(path)
+			s, err = openTestDatabase(t, database)
 			require.NoError(t, err)
 			defer s.Close()
 			require.NoError(t, s.Bind(t.Context(), binding, DefaultLimits, nil))
